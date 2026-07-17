@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nina — install</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: ui-sans-serif, system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1.25rem; line-height: 1.5; }
+    h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
+    p { color: #666; }
+    @media (prefers-color-scheme: dark) { p { color: #aaa; } }
+    pre { background: #111; color: #eee; padding: 1rem 1.25rem; border-radius: 6px; overflow-x: auto; }
+    code { font-family: ui-monospace, monospace; font-size: 0.9rem; }
+    ol { padding-left: 1.25rem; }
+  </style>
+</head>
+<body>
+  <h1>Nina</h1>
+  <p>Host install (Docker Compose + Docker Hub images).</p>
+  <pre><code>curl -fsSL https://motirolabs.com/nina/install.sh | bash</code></pre>
+  <ol>
+    <li>Edit <code>/opt/nina/.env</code> (Telegram token, owner allow-list, DB password).</li>
+    <li>Start: <code>nina up</code></li>
+  </ol>
+  <p>Optional immediate start: <code>curl -fsSL https://motirolabs.com/nina/install.sh | INSTALL_START=1 bash</code></p>
+</body>
+</html>

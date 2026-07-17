@@ -1,0 +1,77 @@
+# Nina v2 — production deploy (image pull only).
+#
+# Services: nats + postgres + telegram.
+# Host data: ${NINA_DATA_ROOT:-/opt/ninabot}/{postgres,nats,google/tokens,google/credentials}
+# Images: ${NINA_IMAGE_PREFIX}-telegram:${NINA_IMAGE_TAG}
+# Ops: ./nina up|down|restart|status|logs
+
+name: nina
+
+services:
+  nats:
+    image: nats:2.11-alpine
+    container_name: nina-nats
+    restart: unless-stopped
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    ports:
+      - "${NATS_PORT:-4222}:4222"
+      - "${NATS_MONITOR_PORT:-8222}:8222"
+    volumes:
+      - ${NINA_DATA_ROOT:-/opt/ninabot}/nats:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8222/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - nina
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: nina-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-nina}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nina}
+      POSTGRES_DB: ${POSTGRES_DB:-nina}
+    expose:
+      - "5432"
+    volumes:
+      - ${NINA_DATA_ROOT:-/opt/ninabot}/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - nina
+
+  telegram:
+    image: ${NINA_IMAGE_PREFIX:-carlosrabelo/nina}-telegram:${NINA_IMAGE_TAG:-latest}
+    container_name: nina-telegram
+    restart: unless-stopped
+    environment:
+      NATS_URL: ${NATS_URL:-nats://nats:4222}
+      NINA_HTTP_HOST: ${NINA_HTTP_HOST:-0.0.0.0}
+      NINA_HTTP_PORT: ${NINA_HTTP_PORT:-8080}
+      NINA_LOG_LEVEL: ${NINA_LOG_LEVEL:-INFO}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_OWNER_ID: ${TELEGRAM_OWNER_ID:-}
+      NINA_OWNER_ALLOWLIST: ${NINA_OWNER_ALLOWLIST:-}
+    expose:
+      - "8080"
+    depends_on:
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:8080/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    networks:
+      - nina
+
+networks:
+  nina:
+    name: nina

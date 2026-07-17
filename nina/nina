@@ -1,0 +1,268 @@
+#!/usr/bin/env bash
+# Nina v2 host ops (deploy package under /opt/nina).
+#
+# Stack: nats + postgres + telegram (docker-compose.yml).
+# Host data: ${NINA_DATA_ROOT:-/opt/ninabot}
+# Default tag=latest → pull from registry. Tag=local → use local images (no pull).
+#
+#   nina setup | up | down | restart | status | logs
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT_DIR"
+
+SERVICES=(nats postgres telegram)
+APP_SERVICES=(telegram)
+DEFAULT_DATA_ROOT=/opt/ninabot
+DEFAULT_IMAGE_TAG=latest
+
+usage() {
+  cat <<'EOF'
+Usage: nina <command> [args]
+
+Commands:
+  setup              Create .env + host data dirs under NINA_DATA_ROOT
+  up                 Start the stack (registry tag: pull; local tag: no pull)
+  down [--volumes]   Stop the stack (--volumes only drops anonymous/named vols)
+  restart [svc ...]  Recreate (--no-deps). No args = all app services
+  status             Show compose ps and health hints
+  logs [svc ...]     Tail logs (all services if none given)
+  help               Show this help
+
+Environment:
+  NINA_DATA_ROOT       Host data root (default: /opt/ninabot)
+  NINA_IMAGE_PREFIX    Image prefix (default: carlosrabelo/nina)
+  NINA_IMAGE_TAG       Image tag (default: latest). local → no registry pull
+  NINA_PULL            Override: always | never | missing
+
+Host layout (bind mounts):
+  $NINA_DATA_ROOT/postgres
+  $NINA_DATA_ROOT/nats
+  $NINA_DATA_ROOT/google/tokens
+  $NINA_DATA_ROOT/google/credentials
+
+Services: nats, postgres, telegram
+EOF
+}
+
+fail() {
+  echo "nina: $*" >&2
+  exit 1
+}
+
+compose() {
+  docker compose -f docker-compose.yml "$@"
+}
+
+env_value() {
+  local key="$1"
+  local def="${2:-}"
+  if [[ -n "${!key:-}" ]]; then
+    printf '%s\n' "${!key}"
+    return
+  fi
+  if [[ -f .env ]]; then
+    local line value
+    line="$(grep -E "^[[:space:]]*${key}=" .env | tail -n1 || true)"
+    if [[ -n "$line" ]]; then
+      value="${line#${key}=}"
+      value="${value%\"}"
+      value="${value#\"}"
+      value="${value%\'}"
+      value="${value#\'}"
+      if [[ -n "$value" ]]; then
+        printf '%s\n' "$value"
+        return
+      fi
+    fi
+  fi
+  printf '%s\n' "$def"
+}
+
+data_root() {
+  env_value NINA_DATA_ROOT "$DEFAULT_DATA_ROOT"
+}
+
+image_tag() {
+  env_value NINA_IMAGE_TAG "$DEFAULT_IMAGE_TAG"
+}
+
+use_registry_pull() {
+  local pull tag
+  pull="$(env_value NINA_PULL "")"
+  case "$pull" in
+    always | 1 | yes | true) return 0 ;;
+    never | 0 | no | false) return 1 ;;
+  esac
+  tag="$(image_tag)"
+  [[ "$tag" != "local" ]]
+}
+
+ensure_data_dirs() {
+  local root="$1"
+  local dirs=("$root" "$root/postgres" "$root/nats" "$root/google" "$root/google/tokens" "$root/google/credentials")
+  local d
+  for d in "${dirs[@]}"; do
+    if [[ -d "$d" ]]; then
+      continue
+    fi
+    if mkdir -p "$d" 2>/dev/null; then
+      continue
+    fi
+    if command -v sudo >/dev/null 2>&1; then
+      echo "nina: creating $d (sudo)…"
+      sudo mkdir -p "$d"
+      sudo chown "$(id -u):$(id -g)" "$root" "$d" 2>/dev/null || true
+    else
+      fail "cannot create $d — run: sudo mkdir -p $root/{postgres,nats,google/tokens,google/credentials} && sudo chown \$USER:\$USER $root"
+    fi
+  done
+}
+
+validate_services() {
+  local svc
+  for svc in "$@"; do
+    local ok=0
+    local s
+    for s in "${SERVICES[@]}"; do
+      if [[ "$s" == "$svc" ]]; then
+        ok=1
+        break
+      fi
+    done
+    if [[ "$ok" -ne 1 ]]; then
+      fail "unknown service: $svc (allowed: ${SERVICES[*]})"
+    fi
+  done
+}
+
+cmd_setup() {
+  if [[ ! -f .env.example ]]; then
+    fail "missing .env.example"
+  fi
+  if [[ ! -f .env ]]; then
+    cp .env.example .env
+    echo "nina: created .env from .env.example — edit it before running up"
+  else
+    echo "nina: .env already exists, not overwriting"
+  fi
+  local root
+  root="$(data_root)"
+  ensure_data_dirs "$root"
+  echo "nina: data root ready → $root/{postgres,nats,google/tokens,google/credentials}"
+}
+
+cmd_up() {
+  if [[ ! -f .env ]]; then
+    fail "no .env — run 'nina setup' first"
+  fi
+  local root tag prefix
+  root="$(data_root)"
+  tag="$(image_tag)"
+  prefix="$(env_value NINA_IMAGE_PREFIX carlosrabelo/nina)"
+  ensure_data_dirs "$root"
+  if [[ "$tag" == "local" ]]; then
+    fail "NINA_IMAGE_TAG=local is for the git checkout (make docker-build), not host install.
+  Set in .env:
+    NINA_IMAGE_PREFIX=carlosrabelo/nina
+    NINA_IMAGE_TAG=latest
+  Then: nina up"
+  fi
+  if use_registry_pull; then
+    echo "nina: pull + up (registry $prefix-*:$tag, data root: $root)"
+    compose pull
+    compose up -d --pull always --remove-orphans
+  else
+    echo "nina: up images (tag=$tag, pull missing only; data root: $root)"
+    compose up -d --pull missing --remove-orphans
+  fi
+  compose ps
+}
+
+cmd_down() {
+  local vols=()
+  if [[ "${1:-}" == "--volumes" || "${1:-}" == "-v" ]]; then
+    vols=(--volumes)
+    shift || true
+  fi
+  if [[ $# -gt 0 ]]; then
+    fail "down: unexpected args: $*"
+  fi
+  echo "nina: down ${vols[*]:-}"
+  if [[ ${#vols[@]} -gt 0 ]]; then
+    echo "nina: note — host bind mounts under $(data_root) are not removed by --volumes"
+  fi
+  compose down "${vols[@]}"
+}
+
+cmd_restart() {
+  local services=("$@")
+  if [[ ${#services[@]} -eq 0 ]]; then
+    services=("${APP_SERVICES[@]}")
+  fi
+  validate_services "${services[@]}"
+  if use_registry_pull; then
+    echo "nina: pull + recreate: ${services[*]}"
+    compose pull "${services[@]}"
+    compose up -d --pull always --no-deps --force-recreate --remove-orphans "${services[@]}"
+  else
+    echo "nina: recreate local: ${services[*]}"
+    compose up -d --pull never --no-deps --force-recreate --remove-orphans "${services[@]}"
+  fi
+  compose ps "${services[@]}"
+}
+
+cmd_status() {
+  local prefix tag
+  prefix="$(env_value NINA_IMAGE_PREFIX carlosrabelo/nina)"
+  tag="$(image_tag)"
+  echo "nina: images ${prefix}-*:${tag}"
+  echo "nina: data root $(data_root)"
+  if use_registry_pull; then
+    echo "nina: pull mode: registry"
+  else
+    echo "nina: pull mode: local"
+  fi
+  compose ps
+  cat <<EOF
+
+Health:
+  telegram → GET http://telegram:8080/health (Compose network)
+  nats → nats://localhost:${NATS_PORT:-4222}  (monitor :${NATS_MONITOR_PORT:-8222}/healthz)
+  postgres → pg_isready (internal only)
+EOF
+}
+
+cmd_logs() {
+  if [[ $# -gt 0 ]]; then
+    validate_services "$@"
+  fi
+  compose logs -f "$@"
+}
+
+main() {
+  command -v docker >/dev/null 2>&1 || fail "docker not found"
+  docker compose version >/dev/null 2>&1 || fail "docker compose not available"
+
+  local cmd="${1:-}"
+  shift || true
+  case "$cmd" in
+    setup) cmd_setup "$@" ;;
+    up) cmd_up "$@" ;;
+    down) cmd_down "$@" ;;
+    restart) cmd_restart "$@" ;;
+    status) cmd_status "$@" ;;
+    logs) cmd_logs "$@" ;;
+    help | -h | --help) usage ;;
+    "")
+      usage
+      exit 1
+      ;;
+    *)
+      usage
+      fail "unknown command: $cmd"
+      ;;
+  esac
+}
+
+main "$@"
